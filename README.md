@@ -36,9 +36,9 @@ La arquitectura sigue un flujo claro:
 
 ---
 ## Estructura del proyecto
--├── main.py Archivo principal de la API
--├── uploads/  Carpeta donde se almacenan los archivos subidos
--├── services/
+**├── main.py Archivo principal de la API
+**├── uploads/  Carpeta donde se almacenan los archivos subidos
+**├── services/
 -│ ├── selector.py  Lógica de selección de documentos relevantes
 -│ ├── parser.py  Extracción de texto desde Excel
 -│ └── prompt.py  Construcción del prompt para el LLM
