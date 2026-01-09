@@ -36,14 +36,14 @@ La arquitectura sigue un flujo claro:
 
 ---
 ## Estructura del proyecto
-**├── main.py Archivo principal de la API
-**├── uploads/  Carpeta donde se almacenan los archivos subidos
-**├── services/
--│ ├── selector.py  Lógica de selección de documentos relevantes
--│ ├── parser.py  Extracción de texto desde Excel
--│ └── prompt.py  Construcción del prompt para el LLM
--├── database/
--│ └── neo4j.py  Conexión y operaciones con Neo4j
+- main.py Archivo principal de la API
+- uploads/  Carpeta donde se almacenan los archivos subidos
+- services/
+- selector.py  Lógica de selección de documentos relevantes
+- parser.py  Extracción de texto desde Excel
+- prompt.py  Construcción del prompt para el LLM
+- database/
+- neo4j.py  Conexión y operaciones con Neo4j
 
 Cuando se recibe una pregunta, el sistema ejecuta los siguientes pasos:
 
