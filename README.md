@@ -35,7 +35,7 @@ La arquitectura sigue un flujo claro:
 7. El usuario consulta el resultado de forma asíncrona.
 
 ---
-Estructura del proyecto
+## Estructura del proyecto
 ├── main.py Archivo principal de la API
 ├── uploads/  Carpeta donde se almacenan los archivos subidos
 ├── services/
