@@ -1,16 +1,16 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from py2neo import Graph, Node, NodeMatcher
+from py2neo import Graph, NodeMatcher
 import ollama
 import os
 import logging
 import uuid
 import threading
-import time
 
-from services.selector import select_documents_for_question
-from services.parser import parse_consolidado_text
+# Importaciones correctas según los archivos que existen
+from services.selector import extract_month_year_cmf_patologia, query_aggregated
+from services.parser import parse_and_insert_consolidado
 from services.prompt import build_prompt
 from database.neo4j import get_graph, save_document_node, list_document_nodes, delete_document_node
 
@@ -27,17 +27,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Iniciar conexión Neo4j (usa wrapper)
-graph, matcher = get_graph()
+# Conexión Neo4j
+graph, _ = get_graph()
+matcher = NodeMatcher(graph)
 
-# Carpeta uploads
 UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Tareas en memoria: { task_id: {status: "pending|running|finished|error", answer: str, error: str}}
-TASKS = {}
+TASKS = {}  # {task_id: {status, answer, error}}
 
-# Modelo de request
 class QuestionRequest(BaseModel):
     question: str
 
@@ -45,7 +43,6 @@ class QuestionRequest(BaseModel):
 def root():
     return {"status": "API funcionando"}
 
-# Endpoint para iniciar tarea (devuelve task_id inmediatamente)
 @app.post("/ask/")
 async def ask_question(request: QuestionRequest):
     question = request.question.strip()
@@ -55,21 +52,26 @@ async def ask_question(request: QuestionRequest):
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {"status": "pending", "answer": None, "error": None}
 
-    # Lanzar ejecución en hilo background (no bloqueante)
-    thread = threading.Thread(target=_process_question_task, args=(task_id, question), daemon=True)
+    thread = threading.Thread(
+        target=_process_question_task,
+        args=(task_id, question),
+        daemon=True
+    )
     thread.start()
 
     return {"task_id": task_id}
 
-# Endpoint para consultar resultado
 @app.get("/result/{task_id}")
 async def get_result(task_id: str):
     task = TASKS.get(task_id)
     if not task:
         return {"status": "not_found"}
-    return {"status": task["status"], "answer": task["answer"], "error": task["error"]}
+    return {
+        "status": task["status"],
+        "answer": task.get("answer"),
+        "error": task.get("error")
+    }
 
-# Endpoint listar documentos
 @app.get("/documents")
 async def list_documents():
     docs = list_document_nodes(matcher)
@@ -83,82 +85,105 @@ async def delete_document(id: str):
             return {"message": f"Documento con ID {id} no encontrado"}
         return {"message": f"Documento con ID {id} eliminado correctamente"}
     except Exception as e:
-        logging.exception(f"❌ Error al eliminar documento: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al eliminar documento: {str(e)}")
+        logging.exception(f"Error al eliminar documento: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Upload endpoint
 @app.post("/upload/")
 async def upload_file(file: UploadFile = File(...)):
     try:
-        # Guardar
         file_path = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        # Si es Excel, intentar parsear hoja consolidado para extraer texto resumido/útil
-        contenido = ""
-        if file.filename.endswith((".xls", ".xlsx")):
-            try:
-                contenido = parse_consolidado_text(file_path)
-            except Exception as e:
-                logging.warning(f"No se pudo parsear Excel para contenido: {e}")
-                # fallback: leer toda la primera hoja como texto
-                try:
-                    df = pd.read_excel(file_path)
-                    contenido = df.to_string(index=False)
-                except Exception:
-                    contenido = ""
+        # Guardamos el nodo Documento básico
+        save_document_node(graph, file.filename, file_path, contenido="")
 
-        # Guardar nodo en Neo4j (ruta, nombre, contenido)
-        save_document_node(graph, file.filename, file_path, contenido)
+        # Opcional: parsear e insertar estructura en Neo4j
+        try:
+            parse_success = parse_and_insert_consolidado(file_path, documento_nombre=file.filename)
+            if parse_success:
+                logging.info(f"Archivo {file.filename} parseado e insertado en Neo4j")
+        except Exception as e:
+            logging.warning(f"No se pudo parsear/insertar estructura: {e}")
 
-        return {"filename": file.filename, "message": "Archivo subido y guardado correctamente"}
+        return {"filename": file.filename, "message": "Archivo subido correctamente"}
+
     except Exception as e:
-        logging.exception(f"❌ Error al subir archivo: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al subir archivo: {str(e)}")
+        logging.exception(f"Error al subir archivo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ------------------------------
-#  Funciones internas
-# ------------------------------
+# ----------------------------------------------------
+# Lógica interna - procesamiento de preguntas
+# ----------------------------------------------------
 def _process_question_task(task_id: str, question: str):
     TASKS[task_id]["status"] = "running"
     try:
-        # 1) seleccionar documentos relevantes (selector hace heurísticas por mes/año/CMF)
-        documentos = list(matcher.match("Documento"))
-        selected_docs = select_documents_for_question(question, documentos)
+        # 1. Extraer parámetros de la pregunta
+        params = extract_month_year_cmf_patologia(question)
 
-        # 2) parsear cada documento seleccionado (leer hoja CONSOLIDADO o primer sheet)
+        # 2. Obtener agregados (esto ya filtra por cmf/patologia)
+        aggregated_results = query_aggregated(params)
+
+        # 3. Seleccionar documentos (versión muy básica por ahora)
+        all_docs = list(matcher.match("Documento"))
+        selected_docs = []
+        
+        # Heurística simple: si hay cmf o patologia, filtrar documentos cuyo nombre coincida
+        cmf_name = params.get("cmf")
+        pat_name = params.get("patologia")
+        
+        for doc in all_docs:
+            doc_dict = dict(doc)
+            nombre = doc_dict.get("nombre", "").lower()
+            if (cmf_name and cmf_name.lower() in nombre) or \
+               (pat_name and pat_name in nombre):
+                selected_docs.append(doc_dict)
+        
+        # Si no encontramos nada específico → usar todos o los más recientes
+        if not selected_docs and all_docs:
+            selected_docs = [dict(d) for d in all_docs[:5]]  # limitamos para no cargar demasiado
+
+        # 4. Obtener contenido de los documentos seleccionados
         docs_contents = []
         for doc in selected_docs:
             ruta = doc.get("ruta")
-            if ruta and os.path.exists(ruta):
-                try:
-                    txt = parse_consolidado_text(ruta)
-                    docs_contents.append({"nombre": doc.get("nombre"), "ruta": ruta, "contenido": txt})
-                except Exception as e:
-                    logging.exception(f"Error parseando documento {ruta}: {e}")
-            else:
-                logging.warning(f"Ruta no existe o falta para doc: {doc}")
+            if not ruta or not os.path.exists(ruta):
+                continue
+                
+            try:
+                # Aquí usamos pandas directamente (simple y efectivo)
+                df = pd.read_excel(ruta, sheet_name="CONSOLIDADO", engine="openpyxl")
+                texto = df.to_string(index=False)
+                docs_contents.append({
+                    "nombre": doc.get("nombre"),
+                    "ruta": ruta,
+                    "contenido": texto[:8000]  # limitamos tamaño para el prompt
+                })
+            except Exception as e:
+                logging.warning(f"No se pudo leer {ruta}: {e}")
 
-        # 3) construir prompt maestro con prompt.build_prompt
-        prompt_text = build_prompt(question, docs_contents)
+        # 5. Construir prompt
+        prompt_text = build_prompt(question, aggregated_results)  # usamos los agregados
 
-        # 4) llamar a ollama.chat (Gemma3) con prompt_text
-        respuesta = ollama.chat(model="gemma3", messages=[{"role": "user", "content": prompt_text}])
+        # Opcional: agregar contenido de documentos si quieres más detalle
+        # if docs_contents:
+        #     prompt_text += "\n\nContenido de documentos relevantes:\n"
+        #     for dc in docs_contents:
+        #         prompt_text += f"\n--- {dc['nombre']} ---\n{dc['contenido'][:2000]}\n"
 
-        # 5) extraer texto respuesta (seguridad)
-        answer_text = None
-        try:
-            answer_text = respuesta["message"]["content"]
-        except Exception:
-            # fallback: stringify
-            answer_text = str(respuesta)
+        # 6. Consultar LLM
+        respuesta = ollama.chat(
+            model="gemma3",
+            messages=[{"role": "user", "content": prompt_text}]
+        )
+
+        answer_text = respuesta.get("message", {}).get("content", str(respuesta))
 
         TASKS[task_id]["status"] = "finished"
         TASKS[task_id]["answer"] = answer_text
 
     except Exception as e:
-        logging.exception(f"❌ Error en task {task_id}: {e}")
+        logging.exception(f"Error procesando pregunta {task_id}: {e}")
         TASKS[task_id]["status"] = "error"
         TASKS[task_id]["error"] = str(e)

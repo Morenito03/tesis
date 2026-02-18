@@ -1,139 +1,120 @@
 # services/selector.py
-from database.neo4j import get_documents
 import re
+from database.neo4j import get_graph
+graph, _ = get_graph()
 
-# ----------------------------
-# Normalización
-# ----------------------------
-def normalize_text(s: str):
-    return s.lower().replace("_", " ").strip()
-
-# ----------------------------
-# Extrae mes y año desde nombre archivo
-# ----------------------------
-def match_month_year_from_name(name: str):
-    name_l = name.lower()
+def extract_month_year_cmf_patologia(text):
+    # ejemplo simple: buscar año 20xx y mes en español
     meses = {
         "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
         "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12
     }
+    month = None
+    year = None
+    cmf = None
+    patologia = None
 
-    # Buscar mes por palabra
-    for mname, mi in meses.items():
-        if mname in name_l:
-            ys = re.findall(r'20\d{2}', name)
-            year = int(ys[0]) if ys else None
-            return mi, year
-
-    # Solo año si no detectó mes
-    ys = re.findall(r'(20\d{2})', name)
+    # year
+    ys = re.findall(r'20\d{2}', text)
     if ys:
-        return None, int(ys[0])
+        year = int(ys[0])
 
-    return None, None
+    # month
+    for mname, mi in meses.items():
+        if mname in text.lower():
+            month = mi
+            break
 
-# ----------------------------
-# Selección simple de un documento por CMF/mes/año
-# ----------------------------
-def select_document(cmf=None, month=None, year=None):
-    docs = get_documents()
-    if not docs:
-        return None
+    # cmf detection (buscar 'cmf 1' o 'cmf' + palabra)
+    m = re.search(r'cmf\s*(\d+)', text.lower())
+    if m:
+        cmf = f"CMF {m.group(1)}"
+    else:
+        # intentar detectar palabras 'cmf' o 'consultorio' + nombre
+        m2 = re.search(r'(cmf|consultorio)\s*[:\-]?\s*([a-zA-Z0-9\s]+)', text.lower())
+        if m2:
+            cmf = m2.group(2).strip().upper()
 
-    # Normalizar mes
-    if isinstance(month, str):
-        try:
-            month = month.strip().lower()
-            meses = {
-                "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-                "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12
-            }
-            month = meses.get(month, None) or int(month)
-        except Exception:
-            month = None
+    # patologia simple: buscar palabras clave 'diabetes', 'asma', etc.
+    # ideal: usar lista de patologías; aquí extraemos palabra previa a 'casos de X'
+    pat_match = re.search(r'(diabetes|asma|hipertensión|hipertension)', text.lower())
+    if pat_match:
+        patologia = pat_match.group(1)
 
-    candidates = []
-    for doc in docs:
-        name = doc.get("nombre", "")
-        rmonth, ryear = match_month_year_from_name(name)
-        score = 0
+    return {"month": month, "year": year, "cmf": cmf, "patologia": patologia}
 
-        # Año exacto
-        if year and ryear and int(ryear) == int(year):
-            score += 3
+def query_aggregated(params):
+    """
+    Devuelve un resumen (total y algunos detalles) FIFO sobre la consulta:
+    - total por patología/CMF/mes
+    - desglose por 'Registro' (ej. días)
+    """
+    month = params.get("month")
+    year = params.get("year")
+    cmf = params.get("cmf")
+    pat = params.get("patologia")
 
-        # Mes exacto
-        if month and rmonth and int(rmonth) == int(month):
-            score += 4
+    # construir cláusula WHERE dinámicamente
+    where_clauses = []
+    if cmf:
+        where_clauses.append("cmf.nombre = $cmf")
+    if pat:
+        where_clauses.append("pat.nombre CONTAINS $pat")
+    # si tienes mes/año como propiedades en Documento o Registro, añade filtros
+    where_cy = " AND ".join(where_clauses)
+    if where_cy:
+        where_cy = "WHERE " + where_cy
 
-        # CMF en nombre
-        if cmf:
-            if cmf.lower() in name.lower():
-                score += 5
-            if any(token in name.lower() for token in cmf.lower().split()):
-                score += 1
+    # ejemplo de agregación: total por patologia y lista de primeros registros
+    cypher = f"""
+    MATCH (pat:Patologia)<-[:ES_PARA]-(r:Registro)-[:EN_CMF]->(cmf:CMF)
+    {where_cy}
+    RETURN pat.nombre AS patologia, cmf.nombre AS cmf, sum(r.cantidad) AS total
+    LIMIT 50
+    """
+    result = graph.run(cypher, cmf=cmf, pat=pat).data()
+    return result
 
-        candidates.append((score, doc))
+# services/selector.py
+# ... (tu código existente)
 
-    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-    best = candidates[0][1] if candidates and candidates[0][0] > 0 else None
-
-    # Si no encuentra pero año coincide, devuelve último del año
-    if not best and year:
-        year_docs = [d for d in docs if str(year) in d.get("nombre", "")]
-        if year_docs:
-            return sorted(year_docs, key=lambda x: x.get("nombre", ""))[-1]
-
-    return best
-
-# ----------------------------------------------------
-# FUNCIÓN QUE FALTABA  (para arreglar tu ERROR)
-# Esta función analiza la pregunta y selecciona documentos
-# ----------------------------------------------------
-def select_documents_for_question(question: str, documentos: list):
-    question_l = question.lower()
-
-    # Mapas de meses
-    meses = {
-        "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-        "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12
-    }
-
-    detected_month = None
-    detected_year = None
-
-    # Buscar mes en pregunta
-    for mname, mid in meses.items():
-        if mname in question_l:
-            detected_month = mid
-
-    # Buscar año en pregunta
-    years = re.findall(r"20\d{2}", question_l)
-    if years:
-        detected_year = int(years[0])
-
-    # Filtrado básico
+def select_documents_for_question(question: str, documentos: list) -> list:
+    """
+    Versión básica: selecciona documentos cuya ruta o nombre contenga palabras clave
+    de la pregunta (mes, año, CMF, patología).
+    """
+    question_lower = question.lower()
+    
+    # Extraer posibles claves de la pregunta
+    info = extract_month_year_cmf_patologia(question_lower)
+    
     selected = []
-
     for doc in documentos:
-        nombre = doc["nombre"].lower()
-        score = 0
-
-        if detected_year and str(detected_year) in nombre:
-            score += 4
-
-        if detected_month:
-            for mname in meses.keys():
-                if mname in nombre:
-                    if meses[mname] == detected_month:
-                        score += 5
-
-        selected.append((score, doc))
-
-    selected = sorted(selected, key=lambda x: x[0], reverse=True)
-
-    # Retornar los mejores 1-3 documentos
-    top_docs = [doc for score, doc in selected if score > 0][:3]
-
-    # Si no encontró nada, devolver todos (fallback)
-    return top_docs if top_docs else [d for _, d in selected[:3]]
+        nombre = (doc.get("nombre") or "").lower()
+        ruta = (doc.get("ruta") or "").lower()
+        contenido = (doc.get("contenido") or "").lower()  # si guardaste contenido
+        
+        # Criterios simples de coincidencia
+        match = False
+        
+        if info.get("month") and info.get("year"):
+            # Buscar mes-año aproximado en nombre o ruta
+            mes_anio = f"{info['month']:02d}-{info['year']}"
+            if mes_anio in nombre or mes_anio in ruta:
+                match = True
+        
+        if info.get("cmf") and info["cmf"].lower() in nombre or info["cmf"].lower() in ruta:
+            match = True
+            
+        if info.get("patologia") and info["patologia"] in nombre or info["patologia"] in contenido:
+            match = True
+        
+        # Si no detectamos nada específico, incluir todos (o los últimos N)
+        if not info.get("month") and not info.get("year") and not info.get("cmf") and not info.get("patologia"):
+            match = True  # fallback: todo si la pregunta es muy general
+        
+        if match:
+            selected.append(doc)
+    
+    # Limitar a 5-10 documentos como máximo para no saturar el prompt
+    return selected[:8]

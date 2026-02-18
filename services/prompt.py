@@ -1,16 +1,10 @@
-def build_prompt(question: str, documents: list) -> str:
+# services/prompt.py
+def build_prompt(question, aggregated_results):
     """
-    Construye el prompt maestro para la IA usando documentos Excel médicos (GBT).
-    Cada documento debe venir como:
-    {
-        "nombre": str,
-        "ruta": str,
-        "contenido": str
-    }
-    """
-
-    intro = """
-Eres un asistente médico especializado.
+    Construye un prompt pequeño y conciso:
+    - una línea de contexto (por ejemplo: "Fuente: REGISTRO DIARIO DE GBT - CONSOLIDADO (mes año)")
+    
+    Eres un asistente médico especializado.
 
 IMPORTANTE:
 - GBT significa Grupo Básico de Trabajo.
@@ -24,41 +18,16 @@ IMPORTANTE:
 - El nombre del archivo indica el MES y el AÑO (ej: REGISTRO DIARIO DE GBT I ENERO 2024).
 - SOLO debes responder usando la información contenida en los documentos.
 - NO inventes datos.
-- Si la información no está disponible, responde claramente que no existe en los registros.
-"""
+-
+- Si la información no está disponible, responde claramente que no existe en los registros
+    """
+    if not aggregated_results:
+        context = "No hay datos estructurados relevantes en la base de datos para la consulta."
+    else:
+        rows = []
+        for r in aggregated_results[:10]:
+            rows.append(f"- {r.get('patologia', 'ND')} | {r.get('cmf','ND')} | total: {r.get('total',0)}")
+        context = "Resumen de datos relevantes:\n" + "\n".join(rows)
 
-    docs_text = ""
-
-    for doc in documents:
-        # 🔒 Protección total contra errores
-        if not isinstance(doc, dict):
-            continue
-
-        nombre = doc.get("nombre", "Documento sin nombre")
-        contenido = doc.get("contenido", "")
-
-        docs_text += f"""
-==============================
-DOCUMENTO: {nombre}
-
-Este documento corresponde a un REGISTRO DIARIO DE GBT.
-El TOTAL GENERAL se encuentra en la hoja CONSOLIDADO.
-
-CONTENIDO:
-{contenido}
-==============================
-"""
-
-    prompt = f"""
-{intro}
-
-DOCUMENTOS DISPONIBLES:
-{docs_text}
-
-PREGUNTA DEL USUARIO:
-{question}
-
-RESPUESTA:
-"""
-
+    prompt = f"{context}\n\nPregunta: {question}\nResponde de forma concisa, mostrando cifras y explicación breve."
     return prompt

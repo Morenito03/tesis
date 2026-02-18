@@ -1,91 +1,46 @@
-from py2neo import Graph, Node, NodeMatcher
-import logging
-import uuid
+# database/neo4j.py
+from py2neo import Graph, Node, Relationship
+import os
 
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASS = os.getenv("NEO4J_PASS", "password")  # ajusta
 
-# ------------------------------
-#  CONEXIÓN A NEO4J
-# ------------------------------
+_graph = None
+
 def get_graph():
-    try:
-        graph = Graph("bolt://localhost:7687")
-        matcher = NodeMatcher(graph)
-        logging.info("✅ Conectado a Neo4j")
-        return graph, matcher
-    except Exception as e:
-        logging.error(f"❌ Error conectando a Neo4j: {e}")
-        raise
+    global _graph
+    if _graph is None:
+        _graph = Graph(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
+        _ensure_constraints(_graph)
+    # node matcher se pide en tu código con matcher = NodeMatcher(graph) si hace falta
+    return _graph, None
 
+def _ensure_constraints(graph):
+    # crea constraints/indices si no existen (Neo4j 4+ syntax)
+    graph.run("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Patologia) REQUIRE p.nombre IS UNIQUE")
+    graph.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:CMF) REQUIRE c.nombre IS UNIQUE")
+    graph.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Documento) REQUIRE d.nombre IS UNIQUE")
+    # index para Registros por fecha/patologia/CMF si lo necesitas
+    # graph.run("CREATE INDEX IF NOT EXISTS FOR (r:Registro) ON (r.fecha)")
 
-# ------------------------------
-#  GUARDAR DOCUMENTO
-# ------------------------------
-def save_document_node(graph, filename, path, content):
-    doc_id = str(uuid.uuid4())  # ID único
+def save_document_node(graph, nombre, ruta, contenido):
+    doc = Node("Documento", nombre=nombre, ruta=ruta)
+    graph.merge(doc, "Documento", "nombre")
+    return doc
 
-    node = Node(
-        "Documento",
-        id=doc_id,
-        nombre=filename,
-        ruta=path,
-        contenido=content
-    )
-    graph.create(node)
-
-    return doc_id
-
-
-# ------------------------------
-#  LISTAR DOCUMENTOS
-# ------------------------------
 def list_document_nodes(matcher):
-    docs = []
-    for doc in matcher.match("Documento"):
-        docs.append({
-            "id": doc.get("id"),
-            "nombre": doc.get("nombre"),
-            "ruta": doc.get("ruta")
-        })
-    return docs
+    # fallback simple: devolver nodos Documento con sus propiedades
+    res = graph.run("MATCH (d:Documento) RETURN d.nombre AS nombre, d.ruta AS ruta, id(d) AS id").data()
+    # transformar id a string
+    for r in res:
+        r["id"] = str(r["id"])
+    return res
 
-
-# ------------------------------
-#  ELIMINAR DOCUMENTO
-# ------------------------------
-def delete_document_node(graph, matcher, doc_id):
-    node = matcher.match("Documento", id=doc_id).first()
-
-    if not node:
-        return False
-    
-    graph.delete(node)
-    return True
-
-
-# ------------------------------
-#  OBTENER DOCUMENTOS (para selector)
-# ------------------------------
-def get_documents():
-    """
-    Devuelve lista de documentos en formato:
-    [
-        { "id": "...", "nombre": "archivo.xls", "ruta": "/uploads/...", "contenido": "texto" },
-        ...
-    ]
-    """
+def delete_document_node(graph, matcher, id_str):
     try:
-        graph = Graph("bolt://localhost:7687")
-        matcher = NodeMatcher(graph)
-
-        docs = []
-        for doc in matcher.match("Documento"):
-            docs.append({
-                "id": doc.get("id"),
-                "nombre": doc.get("nombre"),
-                "ruta": doc.get("ruta"),
-                "contenido": doc.get("contenido", "")
-            })
-        return docs
-    except Exception as e:
-        logging.error(f"❌ Error obteniendo documentos: {e}")
-        return []
+        # id_str proviene de id() devuelto; convertir a int
+        graph.run("MATCH (d) WHERE id(d)=$id DETACH DELETE d", id=int(id_str))
+        return True
+    except Exception:
+        return False
