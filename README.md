@@ -1,75 +1,79 @@
- API de Análisis Inteligente de Documentos con FastAPI, Neo4j y LLM
+# Intelligent Document Analysis API with FastAPI, Neo4j, and LLM
 
- Descripción general
+## Overview
 
-Este proyecto implementa una API REST desarrollada con FastAPI cuyo objetivo es permitir la consulta inteligente de documentos (principalmente archivos Excel) utilizando modelos de lenguaje (LLM) y una base de datos orientada a grafos (Neo4j).
+This project implements a REST API built with **FastAPI** designed to enable intelligent querying of documents (primarily Excel files) using Large Language Models (**LLM**) and a graph-oriented database (**Neo4j**).
 
-El sistema está diseñado para:
-- Almacenar documentos subidos por el usuario.
-- Analizar su contenido (especialmente hojas de tipo CONSOLIDADO).
-- Seleccionar automáticamente los documentos más relevantes según una pregunta.
-- Generar respuestas en lenguaje natural apoyadas en los datos reales de los documentos.
+The system is designed to:
+* Store user-uploaded documents.
+* Analyze their content (specifically "CONSOLIDATED" type sheets).
+* Automatically select the most relevant documents based on a user's question.
+* Generate natural language responses supported by real data from the documents.
 
-Este enfoque resulta especialmente útil en contextos académicos o institucionales donde se manejan reportes mensuales, balances, consolidados financieros o estadísticos, y se requiere una forma más natural de interactuar con ellos.
+This approach is particularly useful in academic or institutional contexts where monthly reports, balance sheets, financial consolidations, or statistical data are managed, requiring a more natural way to interact with them.
+
+---
+
+## General System Architecture
+
+The system combines several key technologies:
+
+* **FastAPI:** Main framework for building the API.
+* **Neo4j:** Graph database for storing document metadata.
+* **Ollama + Gemma 3:** Language model used to answer questions.
+* **Pandas:** For processing and parsing Excel files.
+* **Multithreading:** Handles long-running queries without blocking the API.
+
+### Workflow
+The architecture follows a clear flow:
+1.  The user uploads documents.
+2.  Documents are stored and registered in **Neo4j**.
+3.  The user asks a question.
+4.  The system selects the most relevant documents.
+5.  A contextual **prompt** is constructed.
+6.  The language model generates a response.
+7.  The user retrieves the result asynchronously.
 
 ---
 
- Arquitectura general del sistema
+## Project Structure
 
-El sistema combina varias tecnologías:
+```bash
+├── main.py                 # Main API entry point
+├── uploads/                # Directory for storing uploaded files
+├── services/
+│   ├── selector.py         # Logic for selecting relevant documents
+│   ├── parser.py           # Text extraction from Excel files
+│   ├── prompt.py           # Prompt construction for the LLM
+└── database/
+    └── neo4j.py            # Connection and operations with Neo4j
 
-- FastAPI: Framework principal para la construcción de la API.
-- Neo4j: Base de datos de grafos para almacenar metadatos de los documentos.
-- Ollama + Gemma 3: Modelo de lenguaje utilizado para responder preguntas.
-- Pandas: Procesamiento de archivos Excel.
-- Multithreading: Para manejar consultas largas sin bloquear la API.
+How It Works
+When a question is received, the system executes the following steps:
 
-La arquitectura sigue un flujo claro:
+Relevant Document Selection:
+Heuristics are applied based on:
 
-1. El usuario sube documentos.
-2. Los documentos se almacenan y registran en Neo4j.
-3. El usuario formula una pregunta.
-4. El sistema selecciona los documentos más relevantes.
-5. Se construye un *prompt* contextual.
-6. El modelo de lenguaje genera una respuesta.
-7. El usuario consulta el resultado de forma asíncrona.
+Months
 
----
-## Estructura del proyecto
-- main.py Archivo principal de la API
-- uploads/  Carpeta donde se almacenan los archivos subidos
-- services/
-- selector.py  Lógica de selección de documentos relevantes
-- parser.py  Extracción de texto desde Excel
-- prompt.py  Construcción del prompt para el LLM
-- database/
-- neo4j.py  Conexión y operaciones con Neo4j
+Years
 
-Cuando se recibe una pregunta, el sistema ejecuta los siguientes pasos:
+Keywords
 
-Selección de documentos relevantes
-Se aplican heurísticas basadas en:
+Question context
 
-Meses
+Document Processing:
+Structured text is extracted from the selected Excel files.
 
-Años
+Prompt Construction:
+A contextual prompt is generated including:
 
-Palabras clave
+The user's question.
 
-Contexto de la pregunta
+Relevant fragments extracted from the documents.
 
-Procesamiento de documentos
-Se extrae texto estructurado desde los Excel seleccionados.
+LLM Query (Gemma 3):
+The model generates a response based strictly on the provided information.
 
-Construcción del prompt
-Se genera un prompt contextual que incluye:
-
-La pregunta del usuario
-
-Fragmentos relevantes de los documentos
-
-Consulta al modelo de lenguaje (Gemma 3)
-El modelo genera una respuesta basada únicamente en la información proporcionada.
-
-Entrega del resultado
-La respuesta se almacena y queda disponible para consulta.
+Result Delivery:
+The response is stored and becomes available for the user to query.
