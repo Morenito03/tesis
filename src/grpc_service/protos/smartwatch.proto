@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package smartwatch;
+
+service SmartwatchService {
+  rpc ProcessSmartwatchImage(SmartwatchRequest) returns (SmartwatchResponse);
+}
+
+message SmartwatchRequest {
+  bytes image = 1;  // Image data in bytes
+  string timestamp = 2;  // Hora de la petición
+  string user_id = 3;  // Usuario que realiza la petición
+  string command = 4;  // Orden
+  string description = 5;  // Texto de descripción
+}
+
+message SmartwatchResponse {
+  string extracted_data = 1;  // JSON string with extracted data
+  int32 inference_time_ms = 2;  // Tiempo de inferencia en milisegundos
+  bool success = 3;
+  string error_message = 4;  // Mensaje de error si success=false
+}
