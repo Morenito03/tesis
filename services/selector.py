@@ -1,120 +1,90 @@
 # services/selector.py
 import re
 from database.neo4j import get_graph
+
 graph, _ = get_graph()
 
 def extract_month_year_cmf_patologia(text):
-    # ejemplo simple: buscar año 20xx y mes en español
-    meses = {
-        "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-        "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12
-    }
-    month = None
-    year = None
+    """
+    Extrae entidades clave de la pregunta del usuario.
+    """
+    text = text.lower()
+    
+    # 1. Detección de CMF (Busca 'cmf 3', 'consultorio 5', o solo el número si viene con cmf)
     cmf = None
-    patologia = None
+    m_cmf = re.search(r'(cmf|consultorio)\s*(\d+)', text)
+    if m_cmf:
+        # Lo guardamos como string para comparar con el nombre del nodo
+        cmf = m_cmf.group(2)
 
-    # year
-    ys = re.findall(r'20\d{2}', text)
-    if ys:
-        year = int(ys[0])
-
-    # month
-    for mname, mi in meses.items():
-        if mname in text.lower():
-            month = mi
+    # 2. Detección de Conceptos Principales
+    # Agregamos los términos exactos de tu Excel
+    conceptos_clave = [
+        "consulta medicina", "terreno medicina", "examen pre-empleo", 
+        "examen periodico", "geriatria", "estomatologia", "citologia",
+        "sindrome febril", "ingreso hogar"
+    ]
+    concepto_detectado = None
+    for c in conceptos_clave:
+        if c in text:
+            concepto_detectado = c.upper()
             break
 
-    # cmf detection (buscar 'cmf 1' o 'cmf' + palabra)
-    m = re.search(r'cmf\s*(\d+)', text.lower())
-    if m:
-        cmf = f"CMF {m.group(1)}"
-    else:
-        # intentar detectar palabras 'cmf' o 'consultorio' + nombre
-        m2 = re.search(r'(cmf|consultorio)\s*[:\-]?\s*([a-zA-Z0-9\s]+)', text.lower())
-        if m2:
-            cmf = m2.group(2).strip().upper()
+    # 3. Detección de Subconceptos (Rangos de edad o desgloses)
+    subconceptos_clave = ["19", "20-59", "60y+", "total"]
+    sub_detectado = None
+    for s in subconceptos_clave:
+        # Buscamos la palabra exacta para no confundir '19' con '2019'
+        if re.search(rf'\b{s}\b', text):
+            sub_detectado = s.upper()
+            break
 
-    # patologia simple: buscar palabras clave 'diabetes', 'asma', etc.
-    # ideal: usar lista de patologías; aquí extraemos palabra previa a 'casos de X'
-    pat_match = re.search(r'(diabetes|asma|hipertensión|hipertension)', text.lower())
-    if pat_match:
-        patologia = pat_match.group(1)
-
-    return {"month": month, "year": year, "cmf": cmf, "patologia": patologia}
+    return {
+        "cmf": cmf,
+        "concepto": concepto_detectado,
+        "subconcepto": sub_detectado
+    }
 
 def query_aggregated(params):
     """
-    Devuelve un resumen (total y algunos detalles) FIFO sobre la consulta:
-    - total por patología/CMF/mes
-    - desglose por 'Registro' (ej. días)
+    Ejecuta la consulta en Neo4j adaptada a la jerarquía de Concepto-Subconcepto.
     """
-    month = params.get("month")
-    year = params.get("year")
     cmf = params.get("cmf")
-    pat = params.get("patologia")
+    concepto = params.get("concepto")
+    sub = params.get("subconcepto")
 
-    # construir cláusula WHERE dinámicamente
+    # CASO A: El usuario pregunta por un TOTAL GENERAL (TTL/GRAL)
+    # Ejemplo: "¿Cuál es el total de Consulta Medicina?"
+    if (not cmf or "total" in str(sub).lower()) and concepto:
+        cypher = """
+        MATCH (n:Concepto)
+        WHERE n.nombre CONTAINS $concepto
+        RETURN n.nombre AS concepto, 'TODOS' AS cmf, n.total_general AS total
+        """
+        return graph.run(cypher, concepto=concepto).data()
+
+    # CASO B: El usuario pregunta por un dato específico de un CMF
+    # Ejemplo: "19 años en Consulta Medicina CMF 3"
     where_clauses = []
     if cmf:
-        where_clauses.append("cmf.nombre = $cmf")
-    if pat:
-        where_clauses.append("pat.nombre CONTAINS $pat")
-    # si tienes mes/año como propiedades en Documento o Registro, añade filtros
-    where_cy = " AND ".join(where_clauses)
-    if where_cy:
-        where_cy = "WHERE " + where_cy
+        # Buscamos que el nombre del CMF contenga el número (ej. "3" en "3.0" o "CMF 3")
+        where_clauses.append("c.nombre CONTAINS $cmf")
+    
+    if concepto and sub and sub != "TOTAL":
+        # Buscamos el nombre combinado que creamos en el parser: "PADRE - HIJO"
+        where_clauses.append("n.nombre CONTAINS $concepto AND n.nombre CONTAINS $sub")
+    elif concepto:
+        where_clauses.append("n.nombre CONTAINS $concepto")
 
-    # ejemplo de agregación: total por patologia y lista de primeros registros
+    if not where_clauses:
+        return []
+
+    where_cy = "WHERE " + " AND ".join(where_clauses)
+
     cypher = f"""
-    MATCH (pat:Patologia)<-[:ES_PARA]-(r:Registro)-[:EN_CMF]->(cmf:CMF)
+    MATCH (c:CMF)<-[:REGISTRADO_EN]-(r:Registro)-[:CORRESPONDE_A]->(n)
     {where_cy}
-    RETURN pat.nombre AS patologia, cmf.nombre AS cmf, sum(r.cantidad) AS total
-    LIMIT 50
+    RETURN n.nombre AS concepto, c.nombre AS cmf, r.valor AS total
     """
-    result = graph.run(cypher, cmf=cmf, pat=pat).data()
-    return result
-
-# services/selector.py
-# ... (tu código existente)
-
-def select_documents_for_question(question: str, documentos: list) -> list:
-    """
-    Versión básica: selecciona documentos cuya ruta o nombre contenga palabras clave
-    de la pregunta (mes, año, CMF, patología).
-    """
-    question_lower = question.lower()
     
-    # Extraer posibles claves de la pregunta
-    info = extract_month_year_cmf_patologia(question_lower)
-    
-    selected = []
-    for doc in documentos:
-        nombre = (doc.get("nombre") or "").lower()
-        ruta = (doc.get("ruta") or "").lower()
-        contenido = (doc.get("contenido") or "").lower()  # si guardaste contenido
-        
-        # Criterios simples de coincidencia
-        match = False
-        
-        if info.get("month") and info.get("year"):
-            # Buscar mes-año aproximado en nombre o ruta
-            mes_anio = f"{info['month']:02d}-{info['year']}"
-            if mes_anio in nombre or mes_anio in ruta:
-                match = True
-        
-        if info.get("cmf") and info["cmf"].lower() in nombre or info["cmf"].lower() in ruta:
-            match = True
-            
-        if info.get("patologia") and info["patologia"] in nombre or info["patologia"] in contenido:
-            match = True
-        
-        # Si no detectamos nada específico, incluir todos (o los últimos N)
-        if not info.get("month") and not info.get("year") and not info.get("cmf") and not info.get("patologia"):
-            match = True  # fallback: todo si la pregunta es muy general
-        
-        if match:
-            selected.append(doc)
-    
-    # Limitar a 5-10 documentos como máximo para no saturar el prompt
-    return selected[:8]
+    return graph.run(cypher, cmf=cmf, concepto=concepto, sub=sub).data()

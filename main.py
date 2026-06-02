@@ -131,7 +131,7 @@ def _process_question_task(task_id: str, question: str):
         
         # Heurística simple: si hay cmf o patologia, filtrar documentos cuyo nombre coincida
         cmf_name = params.get("cmf")
-        pat_name = params.get("patologia")
+        pat_name = params.get("concepto")
         
         for doc in all_docs:
             doc_dict = dict(doc)
@@ -187,3 +187,98 @@ def _process_question_task(task_id: str, question: str):
         logging.exception(f"Error procesando pregunta {task_id}: {e}")
         TASKS[task_id]["status"] = "error"
         TASKS[task_id]["error"] = str(e)
+        
+
+import re
+
+# Función auxiliar interna para extraer automáticamente el Mes y Año del nombre del archivo
+def extraer_mes_anio_del_nombre(filename: str):
+    filename_lower = filename.lower()
+    
+    # Mapa de meses comunes en los consolidados estadísticos cubanos
+    meses_map = {
+        "enero": "Ene", "febrero": "Feb", "marzo": "Mar", "abril": "Abr",
+        "mayo": "May", "junio": "Jun", "julio": "Jul", "agosto": "Ago",
+        "septiembre": "Sep", "octubre": "Oct", "noviembre": "Nov", "diciembre": "Dic"
+    }
+    
+    mes_detectado = "Consolidado"
+    for mes_es, mes_abr in meses_map.items():
+        if mes_es in filename_lower:
+            mes_detectado = mes_abr
+            break
+            
+    # Si no viene en texto, busca un formato numérico de mes (01 al 12)
+    if mes_detectado == "Consolidado":
+        numeros_mes = re.findall(r"\b\d{2}\b", filename)
+        if numeros_mes:
+            num = int(numeros_mes[0])
+            if 1 <= num <= 12:
+                listado = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+                mes_detectado = listado[num - 1]
+
+    # Extrae el año (cualquier número de 4 dígitos que comience con 20)
+    anio_match = re.search(r"20\d{2}", filename)
+    anio_detectado = anio_match.group(0) if anio_match else "Actual"
+    
+    return mes_detectado, anio_detectado
+
+
+# ----------------------------------------------------
+# DASHBOARD INDICADORES MENSUALES DINÁMICO
+# ----------------------------------------------------
+
+@app.get("/dashboard")
+def dashboard_data():
+    # 1. Obtener el último documento registrado en el Grafo para dinamismo total
+    query_ultimo_doc = "MATCH (d:Documento) RETURN d.nombre AS nombre ORDER BY d.nombre DESC LIMIT 1"
+    res_doc = graph.run(query_ultimo_doc).data()
+    
+    # Valores por defecto en caso de que la base de datos esté vacía
+    mes_actual, anio_actual = "S/D", "Actual"
+    
+    if res_doc:
+        ultimo_archivo = res_doc[0]["nombre"]
+        mes_actual, anio_actual = extraer_mes_anio_del_nombre(ultimo_archivo)
+
+    # 2. Consulta de agregación fáctica para los Conceptos Médicos del Grafo
+    query_conceptos = """
+    MATCH (r:Registro)-[:CORRESPONDE_A]->(c:Concepto)
+    WHERE c.nombre IN [
+        'SÍNDROME FEBRIL',
+        'RIESGO PRECONCEPCIONAL',
+        'MUJER EDAD FERTIL',
+        'CONSULTA MEDICINA',
+        'ALTA INGRESO  HOGAR',
+        'INGRESO HOGAR'
+    ]
+    RETURN
+        c.nombre AS concepto,
+        SUM(r.valor) AS total
+    """
+    result_conceptos = graph.run(query_conceptos).data()
+
+    # 3. Consulta independiente para totalizar Consultorios (CMF) activos
+    query_cmf = "MATCH (c:CMF) RETURN COUNT(c) AS total_cmf"
+    result_cmf = graph.run(query_cmf).data()
+    total_cmf = result_cmf[0]['total_cmf'] if result_cmf else 0
+
+    dashboard = {}
+
+    # 4. Empaquetado de datos estructurado exactamente como lo mapea index.js
+    for row in result_conceptos:
+        concepto = row["concepto"]
+        dashboard[concepto] = [{
+            "mes": mes_actual,       # Ej: "May", "Ene" extraído del Excel actual
+            "anio": anio_actual,     # Ej: "2026" extraído del Excel actual
+            "valor": row["total"]
+        }]
+
+    # Inyección limpia para la tarjeta de control institucional de CMFs
+    dashboard["CMF"] = [{
+        "mes": "Total",
+        "anio": "Activos",
+        "valor": total_cmf
+    }]
+
+    return dashboard
