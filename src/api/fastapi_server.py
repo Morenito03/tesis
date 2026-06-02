@@ -4,11 +4,19 @@ import os
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+from datetime import datetime # Para la fecha del registro
+from pymongo import MongoClient # Para conectar a tu DB
 
 # Importación absoluta desde tu carpeta src
 from src.llm.factory import LLMFactory
 
-app = FastAPI(title="Medistruct Single-IA Service")
+app = FastAPI(title="smartwatch Single-IA Service")
+
+# --- CONEXIÓN A MONGO DB ---
+# Se conecta a tu base de datos y a la colección que pediste
+client = MongoClient("mongodb://localhost:27017/")
+db = client.smartwatch_db
+collection = db.Embarazadas 
 
 # Configuración de CORS
 app.add_middleware(
@@ -19,12 +27,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Variable global para mantener el modelo en RAM (i7 3ra Gen / 8GB RAM)
+# Variable global para mantener el modelo en RAM
 vision_llm = None
 
-@app.post("/process") # Mantenemos /process para evitar el 404 en tu React
+@app.post("/process") 
 async def process_image_all_in_one(
     image: UploadFile = File(...),
+    nombre: str = Form(...),    # Nuevo: Recibimos el nombre
+    telefono: str = Form(...),  # Nuevo: Recibimos el teléfono
+    correo: str = Form(...),    # Nuevo: Recibimos el correo
     user_id: str = Form("default_user"),
     timestamp: str = Form("now")
 ):
@@ -42,32 +53,33 @@ async def process_image_all_in_one(
             raise HTTPException(status_code=500, detail=str(e))
 
     try:
-        # 2. Preparar la imagen para PIL (como pide moondream.py / qwen2vl.py)
+        # 2. Preparar la imagen para PIL
         image_bytes = await image.read()
         pil_image = Image.open(io.BytesIO(image_bytes))
         if pil_image.mode != "RGB":
             pil_image = pil_image.convert("RGB")
 
         # 3. Prompt único: Extraer + Analizar
-        # Este prompt le pide a la IA que haga todo el trabajo de una vez
-        user_prompt = f"""
-        Analyze this smartwatch image for user {user_id}.
-        1. Extract: Heart rate, SpO2 (Oxygen), and Steps.
-        2. Provide a brief health risk analysis based on these metrics.
-        
-        Return the result strictly as a JSON object with this format:
-        {{
-          "heart_rate": 0,
-          "oxygen": 0,
-          "steps": 0,
-          "analysis": "text here"
-        }}
-        """
+        user_prompt = """
+Analiza esta imagen de un smartwatch. 
+Extrae: 
+- heart_rate (frecuencia cardiaca en BPM)
+- oxygen (SpO2 en %)
+- steps (pasos, si no hay pon 0)
+- analysis (un breve comentario médico de 1 oración)
+
+Devuelve SOLO un JSON con este formato:
+{
+  "heart_rate": 83,
+  "oxygen": 98,
+  "steps": 0,
+  "analysis": "..."
+}
+"""
 
         start_time = time.time()
 
-        # 4. Ejecutar tu lógica local (moondream.py o qwen2vl.py)
-        # La función process_image ya tiene el extractor de JSON {}
+        # 4. Ejecutar la lógica local de la IA
         extracted_data = vision_llm.process_image(
             image=pil_image,
             prompt=user_prompt
@@ -75,8 +87,22 @@ async def process_image_all_in_one(
 
         total_time_ms = int((time.time() - start_time) * 1000)
 
-        # 5. Respuesta para el frontend
-        # Enviamos 'extracted_data' que es lo que React suele esperar
+        # --- 5. GUARDADO EN MONGODB (Lo que pediste) ---
+        # Creamos el documento con la estructura para el Médico
+        registro_paciente = {
+            "nombre": nombre,
+            "telefono": telefono,
+            "correo": correo,
+            "datos_salud": extracted_data, # Aquí va el JSON de la IA (BPM, Oxígeno, etc.)
+            "fecha_analisis": datetime.now(),
+            "i7_process_time": total_time_ms
+        }
+        
+        # Insertamos en la colección 'Embarazadas'
+        collection.insert_one(registro_paciente)
+        print(f"✓ Registro de {nombre} guardado en smartwatch_db.")
+
+        # 6. Respuesta para el frontend
         return {
             "success": True,
             "extracted_data": extracted_data,

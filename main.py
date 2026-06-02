@@ -4,6 +4,16 @@ import argparse
 import os
 from pathlib import Path
 
+
+# Dentro del archivo principal del servicio de Yaisel
+from pymongo import MongoClient
+
+# Conexión a la base de datos específica que mencionaste
+client = MongoClient("mongodb://localhost:27017/")
+db = client.smartwatch_db
+collection = db.Embarazadas # Se crea automáticamente si no existe
+
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
